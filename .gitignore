@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Pytest
+.pytest_cache/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+tfplan
+crash.log
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
