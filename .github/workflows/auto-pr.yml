@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - uses: google-gemini/gemini-cli-action@v1
+      - uses: google-gemini/gemini-cli-action@main
         with:
           api_key: ${{ secrets.GEMINI_API_KEY }}
           args: |
