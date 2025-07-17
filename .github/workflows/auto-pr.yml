@@ -16,6 +16,8 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           prompt: |
             /background Issue内容を解析し、新規 Python モジュール + pytest テストを生成
+            Issue Title: ${{ github.event.issue.title }}
+            Issue Body: ${{ github.event.issue.body }}
       - name: Create branch & PR
         run: |
           gh auth login --with-token < <(echo ${{ secrets.GITHUB_TOKEN }})
