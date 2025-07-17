@@ -11,8 +11,8 @@ jobs:
       - uses: actions/checkout@v3
       - uses: google-gemini/gemini-cli-action@main
         with:
-          api_key: ${{ secrets.GEMINI_API_KEY }}
-          args: |
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          prompt: |
             /background Issue内容を解析し、新規 Python モジュール + pytest テストを生成
       - name: Create branch & PR
         run: |
