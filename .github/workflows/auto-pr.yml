@@ -10,6 +10,7 @@ jobs:
     permissions:
       contents: write        # ブランチ作成・pushに必要
       pull-requests: write   # PR作成に必要
+      workflows: write       # ワークフローの変更に必要
 
     steps:
       # 1. リポジトリを完全クローン（履歴不足を防止）
