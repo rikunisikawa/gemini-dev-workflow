@@ -12,12 +12,17 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: google-gemini/gemini-cli-action@main
+        id: gemini_cli_action
         with:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           prompt: |
             /background Issue内容を解析し、新規 Python モジュール + pytest テストを生成
             Issue Title: ${{ github.event.issue.title }}
             Issue Body: ${{ github.event.issue.body }}
+      - name: Checkout new branch
+        run: |
+          BRANCH_NAME=$(echo ${{ steps.gemini_cli_action.outputs.branch_name }})
+          git checkout $BRANCH_NAME
       - name: Create branch & PR
         run: |
           gh auth login --with-token < <(echo ${{ secrets.GITHUB_TOKEN }})
