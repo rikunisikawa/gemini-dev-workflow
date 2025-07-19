@@ -18,5 +18,11 @@ jobs:
             /background Issue内容を解析し、新規 Python モジュール + pytest テストを生成
             Issue Title: ${{ github.event.issue.title }}
             Issue Body: ${{ github.event.issue.body }}
-          create_pr: true
+      - name: Create branch & PR
+        run: |
+          gh auth login --with-token < <(echo ${{ secrets.GITHUB_TOKEN }})
+          gh pr create \
+            --title "feat: ${{ github.event.issue.title }}" \
+            --body "自動生成 PR\n\nIssue: #${{ github.event.issue.number }}" \
+            --base main
 
