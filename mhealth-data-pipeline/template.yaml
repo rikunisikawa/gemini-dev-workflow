@@ -1,0 +1,246 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  mhealth-data-pipeline
+
+  SAM application for processing mHealth dataset from Kaggle.
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: The S3 bucket for the ETL process (raw, stage, processed prefixes will be used).
+    Default: aws-data-platform-20250607
+  KaggleSecretName:
+    Type: String
+    Description: The name of the AWS Secrets Manager secret containing the kaggle.json credentials.
+  GlueJobScriptName:
+    Type: String
+    Default: glue_etl_job.py
+    Description: The name of the Glue ETL script.
+
+Globals:
+  Function:
+    Timeout: 600
+    MemorySize: 256
+    Runtime: python3.11
+    Environment:
+      Variables:
+        BUCKET_NAME: !Ref BucketName
+
+Resources:
+  # IAM Role for the Download Lambda
+  DownloadLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaS3KagglePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${BucketName}/raw/*"
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${KaggleSecretName}-*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+  # Lambda Function to Download data from Kaggle
+  DownloadAndUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/download_and_upload/
+      Handler: app.lambda_handler
+      Role: !GetAtt DownloadLambdaRole.Arn
+      Environment:
+        Variables:
+          KAGGLE_SECRET_NAME: !Ref KaggleSecretName
+
+  # IAM Role for the Convert Lambda
+  ConvertLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaS3ConvertPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource: !Sub "arn:aws:s3:::${BucketName}/raw/*"
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${BucketName}/stage/*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+  # Lambda Function to convert log to parquet
+  ConvertToParquetFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/convert_log_to_parquet/
+      Handler: app.lambda_handler
+      Role: !GetAtt ConvertLambdaRole.Arn
+      MemorySize: 1024 # Pandas can be memory intensive
+
+  # IAM Role for the Glue Job
+  GlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: GlueS3AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetObject
+                Resource:
+                  - !Sub "arn:aws:s3:::${BucketName}"
+                  - !Sub "arn:aws:s3:::${BucketName}/stage/*"
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub "arn:aws:s3:::${BucketName}/processed/*"
+
+  # Glue Job for ETL
+  MhealthGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: mhealth-etl-job
+      Role: !GetAtt GlueJobRole.Arn
+      Command:
+        Name: glueetl
+        PythonVersion: '3'
+        ScriptLocation: !Sub "s3://${BucketName}/scripts/${GlueJobScriptName}"
+      DefaultArguments:
+        "--TempDir": !Sub "s3://${BucketName}/temp/"
+        "--job-bookmark-option": "job-bookmark-enable"
+        "--S3_SOURCE_PATH": !Sub "s3://${BucketName}/stage/"
+        "--S3_TARGET_PATH": !Sub "s3://${BucketName}/processed/"
+        "--CATALOG_DATABASE_NAME": "mhealth_db"
+        "--CATALOG_TABLE_NAME": "mhealth"
+      GlueVersion: "4.0"
+      WorkerType: "G.1X"
+      NumberOfWorkers: 10
+
+  # IAM Role for Step Functions
+  ETLStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub "states.${AWS::Region}.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: StepFunctionsExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "lambda:InvokeFunction"
+                Resource:
+                  - !GetAtt DownloadAndUploadFunction.Arn
+                  - !GetAtt ConvertToParquetFunction.Arn
+              - Effect: Allow
+                Action:
+                  - "glue:StartJobRun"
+                  - "glue:GetJobRun"
+                  - "glue:GetJobRuns"
+                  - "glue:BatchStopJobRun"
+                Resource: !Ref MhealthGlueJob
+
+  # Step Functions State Machine
+  ETLStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: mhealth-etl-statemachine
+      DefinitionUri: statemachine/etl_flow.asl.json
+      DefinitionSubstitutions:
+        DownloadAndUploadFunctionArn: !GetAtt DownloadAndUploadFunction.Arn
+        ConvertToParquetFunctionArn: !GetAtt ConvertToParquetFunction.Arn
+        MhealthGlueJobName: !Ref MhealthGlueJob
+      Role: !GetAtt ETLStateMachineRole.Arn
+
+  # EventBridge Rule to trigger the State Machine
+  ScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Scheduled rule to trigger the mHealth ETL Step Functions"
+      ScheduleExpression: "cron(0 2 * * ? *)" # Run at 2 AM UTC daily
+      State: "ENABLED"
+      Targets:
+        - Arn: !Ref ETLStateMachine
+          Id: "mHealthETLStateMachineTarget"
+          RoleArn: !GetAtt EventBridgeRole.Arn
+
+  # IAM Role for EventBridge to trigger Step Functions
+  EventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: "events.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: EventBridgeToStepFunctionsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: "states:StartExecution"
+                Resource: !Ref ETLStateMachine
+
+Outputs:
+  ETLStateMachineArn:
+    Description: "ARN of the ETL Step Functions State Machine"
+    Value: !Ref ETLStateMachine
+  BucketName:
+    Description: "S3 Bucket used for the ETL process"
+    Value: !Ref BucketName

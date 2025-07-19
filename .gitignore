@@ -20,3 +20,6 @@ crash.log
 .idea/
 .vscode/
 *.swp
+
+# SAM
+.aws-sam/
