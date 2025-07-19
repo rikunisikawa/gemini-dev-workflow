@@ -18,41 +18,57 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 2. Gemini CLIを使ってIssue内容からコードとテストを生成
-      - name: Run Gemini CLI
+      # 2. Geminiにコード変更とPRメッセージ生成を指示
+      - name: Run Gemini CLI for code and PR message generation
         id: gemini
         uses: google-gemini/gemini-cli-action@main
         with:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           prompt: |
             /background あなたはプロのソフトウェアエンジニアです。以下のIssueの内容を完全に理解し、必要なすべてのコード変更（新規作成、修正、削除など）を行ってください。
+            コード変更が完了したら、以下の区切り線を使って、この変更を説明するPull Requestのタイトルと本文を生成してください。
+
             **重要**: `.github/workflows`ディレクトリ内のファイルは絶対に編集しないでください。
 
             Issue Title: ${{ github.event.issue.title }}
             Issue Body: ${{ github.event.issue.body }}
+
+            ---PR_TITLE---
+            [ここにPRのタイトルを記述]
+            ---PR_BODY---
+            [ここにPRの本文を記述]
         continue-on-error: true
 
-      # 3. ブランチ作成・コミット・プッシュ処理
+      # 3. Geminiの出力からPR情報を抽出
+      - name: Extract PR information from Gemini output
+        id: extract_pr_info
+        run: |
+          gemini_output="${{ steps.gemini.outputs.result }}"
+          pr_title=$(echo "$gemini_output" | sed -n '/---PR_TITLE---/,/---PR_BODY---/p' | sed '1d;$d')
+          pr_body=$(echo "$gemini_output" | sed -n '/---PR_BODY---/,$p' | sed '1d')
+          
+          # 複数行を正しく扱うための処理
+          pr_title=$(echo "$pr_title" | head -n 1)
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "pr_body<<$EOF" >> $GITHUB_OUTPUT
+          echo "$pr_body" >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT
+          echo "pr_title=$pr_title" >> $GITHUB_OUTPUT
+
+      # 4. ブランチ作成・コミット・プッシュ処理
       - name: Create and push new branch with generated code
         id: git_work
         run: |
           set -e
-
-          # ブランチ名を取得またはデフォルトに設定
           if [ -z "${{ steps.gemini.outputs.branch_name }}" ]; then
             BRANCH_NAME="feature/issue-${{ github.event.issue.number }}"
           else
             BRANCH_NAME="${{ steps.gemini.outputs.branch_name }}"
           fi
-          
           echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
           echo "Using branch: $BRANCH_NAME"
-
-          # Git ユーザー設定
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # ブランチ作成 or 切替
           git fetch origin
           if git ls-remote --exit-code --heads origin "$BRANCH_NAME" >/dev/null; then
             echo "Branch already exists on remote. Switching..."
@@ -62,8 +78,6 @@ jobs:
             echo "Creating new branch: $BRANCH_NAME"
             git switch -c "$BRANCH_NAME"
           fi
-
-          # 差分があればコミット＆プッシュ
           if [ -n "$(git status --porcelain)" ]; then
             git add -A
             git commit -m "auto: generate code from issue #${{ github.event.issue.number }}"
@@ -72,26 +86,19 @@ jobs:
             echo "No changes to commit."
           fi
 
-      # 4. PR作成（既に存在しない場合のみ）
+      # 5. PR作成（既に存在しない場合のみ）
       - name: Create Pull Request
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRANCH_NAME: ${{ steps.git_work.outputs.branch_name }}
-          PR_BODY: |
-            自動生成 PR
-
-            Issue: #${{ github.event.issue.number }}
-
-            - [ ] コードレビュー
-            - [ ] テストの追加
-            - [ ] ドキュメントの更新
+          PR_TITLE: ${{ steps.extract_pr_info.outputs.pr_title }}
+          PR_BODY: ${{ steps.extract_pr_info.outputs.pr_body }}
         run: |
-          # 既存PRがあるか確認
           if gh pr view "$BRANCH_NAME" --json number -q . >/dev/null 2>&1; then
             echo "PR already exists for branch $BRANCH_NAME"
           else
             gh pr create \
-              --title "feat: ${{ github.event.issue.title }}" \
+              --title "$PR_TITLE" \
               --body "$PR_BODY" \
               --base main \
               --head "$BRANCH_NAME" \
