@@ -10,7 +10,6 @@ jobs:
     permissions:
       contents: write        # ブランチ作成・pushに必要
       pull-requests: write   # PR作成に必要
-      workflows: write       # ワークフローの変更に必要
 
     steps:
       # 1. リポジトリを完全クローン（履歴不足を防止）
@@ -26,7 +25,9 @@ jobs:
         with:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           prompt: |
-            /background Issue内容を解析し、新規 Python モジュール + pytest テストを生成
+            /background あなたはプロのソフトウェアエンジニアです。以下のIssueの内容を完全に理解し、必要なすべてのコード変更（新規作成、修正、削除など）を行ってください。
+            **重要**: `.github/workflows`ディレクトリ内のファイルは絶対に編集しないでください。
+
             Issue Title: ${{ github.event.issue.title }}
             Issue Body: ${{ github.event.issue.body }}
         continue-on-error: true
