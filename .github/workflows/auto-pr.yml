@@ -39,21 +39,36 @@ jobs:
             [ここにPRの本文を記述]
         continue-on-error: true
 
-      # 3. Geminiの出力からPR情報を抽出
-      - name: Extract PR information from Gemini output
+      # 3. Geminiの出力からPR情報を抽出し、失敗した場合はフォールバックを設定
+      - name: Extract PR info or set fallback
         id: extract_pr_info
         run: |
+          echo "--- Start of Gemini Output ---"
+          echo "${{ steps.gemini.outputs.result }}"
+          echo "--- End of Gemini Output ---"
+
           gemini_output="${{ steps.gemini.outputs.result }}"
-          pr_title=$(echo "$gemini_output" | sed -n '/---PR_TITLE---/,/---PR_BODY---/p' | sed '1d;$d')
-          pr_body=$(echo "$gemini_output" | sed -n '/---PR_BODY---/,$p' | sed '1d')
+
+          # awkを使ってPR情報を抽出（前後の空白も除去）
+          pr_title=$(echo "$gemini_output" | awk '/---PR_TITLE---/{flag=1; next} /---PR_BODY---/{flag=0} flag' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          pr_body=$(echo "$gemini_output" | awk '/---PR_BODY---/{flag=1; next} flag')
+
+          # 抽出失敗時のフォールバック処理
+          if [ -z "$pr_title" ]; then
+            echo "Failed to extract PR title. Using issue title as fallback."
+            pr_title="feat: ${{ github.event.issue.title }}"
+          fi
+          if [ -z "$pr_body" ]; then
+            echo "Failed to extract PR body. Using default body as fallback."
+            pr_body="Auto-generated PR for issue #${{ github.event.issue.number }}\n\nGemini was unable to generate a description for this PR."
+          fi
           
-          # 複数行を正しく扱うための処理
-          pr_title=$(echo "$pr_title" | head -n 1)
+          # GitHub Actionsの出力変数に設定
+          echo "pr_title=$(echo "$pr_title" | head -n 1)" >> $GITHUB_OUTPUT
           EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
           echo "pr_body<<$EOF" >> $GITHUB_OUTPUT
           echo "$pr_body" >> $GITHUB_OUTPUT
           echo "$EOF" >> $GITHUB_OUTPUT
-          echo "pr_title=$pr_title" >> $GITHUB_OUTPUT
 
       # 4. ブランチ作成・コミット・プッシュ処理
       - name: Create and push new branch with generated code
