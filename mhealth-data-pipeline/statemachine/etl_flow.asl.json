@@ -1,0 +1,24 @@
+{
+    "Comment": "A description of my state machine",
+    "StartAt": "DownloadKaggleData",
+    "States": {
+      "DownloadKaggleData": {
+        "Type": "Task",
+        "Resource": "${DownloadAndUploadFunctionArn}",
+        "Next": "ConvertLogToParquet"
+      },
+      "ConvertLogToParquet": {
+        "Type": "Task",
+        "Resource": "${ConvertToParquetFunctionArn}",
+        "Next": "TransformAndCatalogWithGlue"
+      },
+      "TransformAndCatalogWithGlue": {
+        "Type": "Task",
+        "Resource": "arn:aws:states:::glue:startJobRun.sync",
+        "Parameters": {
+          "JobName": "${MhealthGlueJobName}"
+        },
+        "End": true
+      }
+    }
+}
