@@ -8,26 +8,90 @@ jobs:
   auto-pr:
     runs-on: ubuntu-latest
     permissions:
-      pull-requests: write
+      contents: write        # ブランチ作成・pushに必要
+      pull-requests: write   # PR作成に必要
+
     steps:
-      - uses: actions/checkout@v3
-      - uses: google-gemini/gemini-cli-action@main
-        id: gemini_cli_action
+      # 1. リポジトリを完全クローン（履歴不足を防止）
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      # 2. Gemini CLIを使ってIssue内容からコードとテストを生成
+      - name: Run Gemini CLI
+        id: gemini
+        uses: google-gemini/gemini-cli-action@main
         with:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           prompt: |
             /background Issue内容を解析し、新規 Python モジュール + pytest テストを生成
             Issue Title: ${{ github.event.issue.title }}
             Issue Body: ${{ github.event.issue.body }}
-      - name: Checkout new branch
-        run: |
-          BRANCH_NAME=$(echo ${{ steps.gemini_cli_action.outputs.branch_name }})
-          git checkout $BRANCH_NAME
-      - name: Create branch & PR
-        run: |
-          gh auth login --with-token < <(echo ${{ secrets.GITHUB_TOKEN }})
-          gh pr create \
-            --title "feat: ${{ github.event.issue.title }}" \
-            --body "自動生成 PR\n\nIssue: #${{ github.event.issue.number }}" \
-            --base main
+        continue-on-error: true
 
+      # 3. ブランチ作成・コミット・プッシュ処理
+      - name: Create and push new branch with generated code
+        id: git_work
+        run: |
+          set -e
+
+          # ブランチ名を取得またはデフォルトに設定
+          if [ -z "${{ steps.gemini.outputs.branch_name }}" ]; then
+            BRANCH_NAME="feature/issue-${{ github.event.issue.number }}"
+          else
+            BRANCH_NAME="${{ steps.gemini.outputs.branch_name }}"
+          fi
+          
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "Using branch: $BRANCH_NAME"
+
+          # Git ユーザー設定
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # ブランチ作成 or 切替
+          git fetch origin
+          if git ls-remote --exit-code --heads origin "$BRANCH_NAME" >/dev/null; then
+            echo "Branch already exists on remote. Switching..."
+            git switch "$BRANCH_NAME"
+            git pull origin "$BRANCH_NAME"
+          else
+            echo "Creating new branch: $BRANCH_NAME"
+            git switch -c "$BRANCH_NAME"
+          fi
+
+          # 差分があればコミット＆プッシュ
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "auto: generate code from issue #${{ github.event.issue.number }}"
+            git push -u origin "$BRANCH_NAME"
+          else
+            echo "No changes to commit."
+          fi
+
+      # 4. PR作成（既に存在しない場合のみ）
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH_NAME: ${{ steps.git_work.outputs.branch_name }}
+          PR_BODY: |
+            自動生成 PR
+
+            Issue: #${{ github.event.issue.number }}
+
+            - [ ] コードレビュー
+            - [ ] テストの追加
+            - [ ] ドキュメントの更新
+        run: |
+          # 既存PRがあるか確認
+          if gh pr view "$BRANCH_NAME" --json number -q . >/dev/null 2>&1; then
+            echo "PR already exists for branch $BRANCH_NAME"
+          else
+            gh pr create \
+              --title "feat: ${{ github.event.issue.title }}" \
+              --body "$PR_BODY" \
+              --base main \
+              --head "$BRANCH_NAME" \
+              --label "auto-generated"
+          fi
