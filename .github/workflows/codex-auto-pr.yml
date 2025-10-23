@@ -1,0 +1,145 @@
+name: "Issue → Branch & PR Automation (Codex)"
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  codex-auto-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.x"
+
+      - name: Install OpenAI CLI dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install openai==1.*
+
+      - name: Run Codex to generate code and PR message
+        id: codex
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          export PROMPT=$(cat <<'P'
+/background あなたはプロのソフトウェアエンジニアです。以下のIssueの内容を完全に理解し、必要なコード変更（新規作成、修正、削除を含む）をすべて実施してください。
+変更が完了したら、Pull Requestのタイトルと本文を以下の区切り線を使って出力してください。
+
+**重要**: `.github/workflows` ディレクトリ内の既存ファイルは編集しないでください。
+
+Issue Title: ${{ github.event.issue.title }}
+Issue Body: ${{ github.event.issue.body }}
+
+---PR_TITLE---
+[ここにPRタイトル]
+---PR_BODY---
+[ここにPR本文]
+P
+)
+
+          python <<'PY'
+import json
+import os
+from textwrap import dedent
+from openai import OpenAI
+
+client = OpenAI()
+prompt = os.environ["PROMPT"]
+
+response = client.responses.create(
+    model="gpt-4.1-mini",
+    input=prompt,
+)
+
+result = response.output_text
+print(result)
+
+with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+    fh.write(f"result<<END_OF_RESULT\n{result}\nEND_OF_RESULT\n")
+PY
+
+      - name: Extract PR info or set fallback
+        id: extract_pr_info
+        run: |
+          echo "--- Start of Codex Output ---"
+          echo "${{ steps.codex.outputs.result }}"
+          echo "--- End of Codex Output ---"
+
+          codex_output="${{ steps.codex.outputs.result }}"
+
+          pr_title=$(echo "$codex_output" | awk '/---PR_TITLE---/{flag=1; next} /---PR_BODY---/{flag=0} flag' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          pr_body=$(echo "$codex_output" | awk '/---PR_BODY---/{flag=1; next} flag')
+
+          if [ -z "$pr_title" ]; then
+            echo "Failed to extract PR title. Using issue title as fallback."
+            pr_title="feat: ${{ github.event.issue.title }}"
+          fi
+          if [ -z "$pr_body" ]; then
+            echo "Failed to extract PR body. Using default body as fallback."
+            pr_body="Auto-generated PR for issue #${{ github.event.issue.number }}\n\nCodex was unable to generate a description for this PR."
+          fi
+
+          echo "pr_title=$(echo "$pr_title" | head -n 1)" >> $GITHUB_OUTPUT
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "pr_body<<$EOF" >> $GITHUB_OUTPUT
+          echo "$pr_body" >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT
+
+      - name: Create and push new branch with generated code
+        id: git_work
+        run: |
+          set -e
+          if [ -z "${{ steps.codex.outputs.branch_name }}" ]; then
+            BRANCH_NAME="feature/issue-${{ github.event.issue.number }}"
+          else
+            BRANCH_NAME="${{ steps.codex.outputs.branch_name }}"
+          fi
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "Using branch: $BRANCH_NAME"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin
+          if git ls-remote --exit-code --heads origin "$BRANCH_NAME" >/dev/null; then
+            echo "Branch already exists on remote. Switching..."
+            git switch "$BRANCH_NAME"
+            git pull origin "$BRANCH_NAME"
+          else
+            echo "Creating new branch: $BRANCH_NAME"
+            git switch -c "$BRANCH_NAME"
+          fi
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "auto: generate code from issue #${{ github.event.issue.number }}"
+            git push -u origin "$BRANCH_NAME"
+          else
+            echo "No changes to commit."
+          fi
+
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH_NAME: ${{ steps.git_work.outputs.branch_name }}
+          PR_TITLE: ${{ steps.extract_pr_info.outputs.pr_title }}
+          PR_BODY: ${{ steps.extract_pr_info.outputs.pr_body }}
+        run: |
+          if gh pr view "$BRANCH_NAME" --json number -q . >/dev/null 2>&1; then
+            echo "PR already exists for branch $BRANCH_NAME"
+          else
+            gh pr create \
+              --title "$PR_TITLE" \
+              --body "$PR_BODY" \
+              --base main \
+              --head "$BRANCH_NAME" \
+              --label "auto-generated"
+          fi
