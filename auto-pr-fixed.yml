@@ -1,0 +1,128 @@
+name: "Issue → ブランチ＆PR 自動化"
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  auto-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # ブランチ作成・pushに必要
+      pull-requests: write   # PR作成に必要
+
+    steps:
+      # 1. リポジトリを完全クローン（履歴不足を防止）
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      # 2. Geminiにコード変更とPRメッセージ生成を指示
+      - name: Run Gemini CLI for code and PR message generation
+        id: gemini
+        uses: google-gemini/gemini-cli-action@main
+        with:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          prompt: |
+            /background あなたはプロのソフトウェアエンジニアです。以下のIssueの内容を完全に理解し、必要なすべてのコード変更（新規作成、修正、削除など）を行ってください。
+            コード変更が完了したら、以下の区切り線を使って、この変更を説明するPull Requestのタイトルと本文を生成してください。
+
+            **重要**: `.github/workflows`ディレクトリ内のファイルは絶対に編集しないでください。
+
+            Issue Title: ${{ github.event.issue.title }}
+            Issue Body: ${{ github.event.issue.body }}
+
+            ---PR_TITLE---
+            [ここにPRのタイトルを記述]
+            ---PR_BODY---
+            [ここにPRの本文を記述]
+        continue-on-error: true
+
+      # 3. Geminiの出力からPR情報を抽出し、失敗した場合はフォールバックを設定
+      - name: Extract PR info or set fallback
+        id: extract_pr_info
+        env:
+          GEMINI_RESULT: ${{ steps.gemini.outputs.result }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          echo "--- Start of Gemini Output ---"
+          echo "$GEMINI_RESULT"
+          echo "--- End of Gemini Output ---"
+
+          gemini_output="$GEMINI_RESULT"
+
+          # awkを使ってPR情報を抽出（前後の空白も除去）
+          pr_title=$(echo "$gemini_output" | awk '/---PR_TITLE---/{flag=1; next} /---PR_BODY---/{flag=0} flag' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          pr_body=$(echo "$gemini_output" | awk '/---PR_BODY---/{flag=1; next} flag')
+
+          # 抽出失敗時のフォールバック処理
+          if [ -z "$pr_title" ]; then
+            echo "Failed to extract PR title. Using issue title as fallback."
+            pr_title="feat: $ISSUE_TITLE"
+          fi
+          if [ -z "$pr_body" ]; then
+            echo "Failed to extract PR body. Using default body as fallback."
+            pr_body="Auto-generated PR for issue #$ISSUE_NUMBER\n\nGemini was unable to generate a description for this PR."
+          fi
+          
+          # GitHub Actionsの出力変数に設定
+          echo "pr_title=$(echo "$pr_title" | head -n 1)" >> $GITHUB_OUTPUT
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "pr_body<<$EOF" >> $GITHUB_OUTPUT
+          echo "$pr_body" >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT
+
+      # 4. ブランチ作成・コミット・プッシュ処理
+      - name: Create and push new branch with generated code
+        id: git_work
+        env:
+          GEMINI_BRANCH: ${{ steps.gemini.outputs.branch_name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -e
+          if [ -z "$GEMINI_BRANCH" ]; then
+            BRANCH_NAME="feature/issue-$ISSUE_NUMBER"
+          else
+            BRANCH_NAME="$GEMINI_BRANCH"
+          fi
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "Using branch: $BRANCH_NAME"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin
+          if git ls-remote --exit-code --heads origin "$BRANCH_NAME" >/dev/null; then
+            echo "Branch already exists on remote. Switching..."
+            git switch "$BRANCH_NAME"
+            git pull origin "$BRANCH_NAME"
+          else
+            echo "Creating new branch: $BRANCH_NAME"
+            git switch -c "$BRANCH_NAME"
+          fi
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "auto: generate code from issue #$ISSUE_NUMBER"
+            git push -u origin "$BRANCH_NAME"
+          else
+            echo "No changes to commit."
+          fi
+
+      # 5. PR作成（既に存在しない場合のみ）
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH_NAME: ${{ steps.git_work.outputs.branch_name }}
+          PR_TITLE: ${{ steps.extract_pr_info.outputs.pr_title }}
+          PR_BODY: ${{ steps.extract_pr_info.outputs.pr_body }}
+        run: |
+          if gh pr view "$BRANCH_NAME" --json number -q . >/dev/null 2>&1; then
+            echo "PR already exists for branch $BRANCH_NAME"
+          else
+            gh pr create \
+              --title "$PR_TITLE" \
+              --body "$PR_BODY" \
+              --base main \
+              --head "$BRANCH_NAME" \
+              --label "auto-generated"
+          fi
